@@ -1,0 +1,92 @@
+# Agent Lab 专用的 Codex 配置（和你在 Codex 桌面版里用的那份完全分开）
+#
+# 为什么要单独一份：
+# 全局 ~/.codex/config.toml 里挂了一堆工具服务（插件、远端 app、IDEA 桥…），
+# 那些东西会一起被塞进模型的上下文。实测：全局配置下 Agent Lab 一开局就有
+# 7 个工具服务、32 个工具，其中「我的知识」只占 2 个。
+# 工具越多，模型选错工具的概率越高、每一轮也越贵——这就是「工具面污染」。
+#
+# 这份配置只做一件事：连上模型 + 挂上「我的知识」。
+
+model = "xiaomi/mimo-v2.6-flash"
+model_provider = "custom"
+openai_base_url = "http://127.0.0.1:57321/v1"
+model_catalog_json = "model-catalogs/relay-mu96ubev.json"
+model_reasoning_effort = "high"
+
+# 关掉内核自带的「托管搜索」。
+# 托管的意思是「由模型服务方去搜」，但 Agent Lab 走的是本地中转，没有那个端点
+# （实测 /v1/alpha/search 返回 404，只会回一句「未知后端路径」）。
+# 不关的后果很隐蔽：模型会看到一个叫 web_search 的工具，高高兴兴去调，
+# 内核却回一句 `unsupported custom tool call: web_search`。
+# 向模型许诺一个兑现不了的工具，比根本没有这个工具更糟。
+# 联网能力改由下面的 my_web_search 服务提供，那是真能跑通的。
+web_search = "disabled"
+
+# Windows 沙箱必须显式配置，否则 workspace-write 会**静默降级成只读**。
+#
+# 这是实测挖出来的，很隐蔽：不配的时候内核把沙箱报成 notConfigured，
+# 而请求里写 sandbox="workspace-write" 得到的响应是
+#   {"type":"workspaceWrite","writableRoots":[]}
+# —— 注意 writableRoots 是**空数组**。看起来是「可写工作区」，实际一个可写
+# 根都没有，于是等于只读。模型于是拿到「写入被只读沙箱拒绝」，
+# 或者干脆绕过工具、让用户自己去终端敲命令。
+#
+# 更坑的是：官方内核（0.155.0）在同样的环境下表现**完全一样**，
+# 所以这不是自编译内核引入的问题，是这台机器上沙箱没配。
+# 加上下面这一行之后，同一个请求的响应变成 workspaceWrite，
+# 而且模型真的把文件写出来了（实测 wcfg-A.txt 落盘，内容 hi）。
+#
+# 注意：这一行只在 Windows 上生效，macOS/Linux 上会被忽略。
+[windows]
+sandbox = "elevated"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "http://127.0.0.1:57321/v1"
+
+# 不要把 token 写在配置文件里。
+#
+# 这段原来是 experimental_bearer_token = "sk-..."（明文）。两个问题：
+#   1. 内核自己的文档就写着这个字段「discouraged in favor of env_key for security reasons」；
+#   2. 这个目录是要进版本库的，明文密钥一旦 commit 就等于公开。
+# 改成从环境变量读：内核在 env_key 指向的变量里找 token，找不到才报错。
+# 日常启动由 start.mjs 负责把值传进来（它从 AGENT_LAB_API_KEY 或本机已有变量取）。
+env_key = "AGENT_LAB_API_KEY"
+
+[projects.'c:\新建文件夹']
+trust_level = "trusted"
+
+[projects.'c:\新建文件夹\agent-lab']
+trust_level = "trusted"
+
+[projects.'c:\hnsh\sherp']
+trust_level = "trusted"
+
+# 关掉「应用/连接器」这类远端工具面（chatgpt.com 那一批）。
+# 这个 App 只干本地开发一件事，不需要账号级的应用工具一起挤上下文。
+# 留个开关：想启用就改成 true。
+[features]
+apps = false
+
+# 「我的知识」工具服务。command/args 由 app/server.mjs 在启动时用 -c 覆盖，
+# 这里留个占位是为了让配置本身可读、也能被 `codex mcp list` 看到。
+[mcp_servers.my_knowledge]
+command = "node"
+args = ["../mcp-my-knowledge/server.mjs"]
+
+# MCP 工具默认是「延迟暴露」：模型得先调一次工具搜索，才能看见 knowledge_search。
+# 实测后果：服务连着、工具清单里也有，但模型会说「这个会话没给我这个工具」，
+# 然后放弃。这里它只有 2 个工具、而且是这个 App 的主功能，没必要藏，
+# 所以把 deferred 从暴露面里去掉，让它一开局就直接在工具列表里。
+omit_tools_from = ["deferred"]
+
+# 联网搜索工具服务。和「我的知识」一样，command/args 由 app/server.mjs 用 -c 覆盖。
+# 这不是内核自带的托管搜索，而是本地起的一个小进程，走 Bing 的 RSS 输出取结果。
+[mcp_servers.my_web_search]
+command = "node"
+args = ["../mcp-web-search/server.mjs"]
+# 同样去掉延迟暴露：模型需要联网时应该直接看到它，而不是先搜一遍工具。
+omit_tools_from = ["deferred"]

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Lab</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <aside class="rail">
+      <div class="rail-head">
+        <span class="dot" id="status-dot"></span>
+        <strong>Agent Lab</strong>
+      </div>
+      <button id="new-thread" class="ghost">新会话</button>
+      <button id="edit-knowledge" class="ghost">编辑我的知识</button>
+      <!-- 会话开在哪个项目，决定苍穹技能能不能找到 ok-cosmic.json。
+           所以这是个真选项，不是装饰。 -->
+      <select id="project" class="project" title="新会话的工作目录"></select>
+      <div class="cwd" id="cwd">工作目录加载中…</div>
+      <div class="threads" id="threads"></div>
+    </aside>
+
+    <main class="main">
+      <header class="bar">
+        <div class="title" id="thread-title">未开始</div>
+        <div class="cost" id="cost"></div>
+        <div class="meta" id="turn-meta"></div>
+      </header>
+
+      <section class="stream" id="stream">
+        <div class="empty" id="empty">
+          在下面输入一句话，让 Codex 在你的项目里动手。
+        </div>
+      </section>
+
+      <footer class="composer">
+        <textarea id="input" rows="1" placeholder="说清楚要它做什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button id="send">发送</button>
+        <button id="stop" class="stop" hidden>停止</button>
+      </footer>
+    </main>
+
+    <div class="modal" id="knowledge-modal" hidden>
+      <div class="modal-box">
+        <div class="modal-head">
+          <strong>我的开发知识</strong>
+          <button id="knowledge-close" class="ghost">关闭</button>
+        </div>
+        <div class="modal-hint" id="knowledge-hint"></div>
+        <textarea id="knowledge-text" spellcheck="false"></textarea>
+        <div class="modal-actions">
+          <button id="knowledge-save">保存</button>
+        </div>
+      </div>
+    </div>
+    <!-- 脚本放最后：它要绑定上面这些元素，必须等 DOM 到位。 -->
+    <script src="/app.js"></script>
+  </body>
+</html>

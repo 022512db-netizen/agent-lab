@@ -1,0 +1,48 @@
+# 本机密钥。不进版本库——这里是明文 token。
+.env
+
+# 运行数据：跟代码无关，而且很大。
+# 实测整个目录 2.4G，其中 codex-home 占 1.9G、浏览器 profile 占 546M。
+# 这些是「跑出来的」，不该跟着代码走。
+.edge-profile/
+# 注意：这里必须写 `codex-home/*` 而不是 `codex-home/`。
+# gitignore 有条硬规矩：父目录被整个排除时，子文件的否定规则不生效。
+# 写 `codex-home/` 的话，下面那几条 ! 会被无视，配置还是进不了版本库。
+codex-home/*
+
+# 但 codex-home 不能整个挡掉：里面有两样是**配置**，不是运行数据。
+# 实测后果（2026-09-23）：新机器 clone 下来这个目录是空的，内核不报错，
+# 只是静默退回默认配置——模型、密钥接入方式、工具挂载全丢。
+# 表现就是「模型一句话都不回」，和之前那个坏模型的迷惑现象一模一样。
+# 所以只放行这两样（共 1.4 MB），其余 1.9G 运行数据继续挡着。
+!codex-home/config.toml
+!codex-home/model-catalogs/
+!codex-home/model-catalogs/**
+.codex-profile/
+launch.log
+.web-search-audit.json
+knowledge-inbox.md
+.thread-usage.json
+
+# 各层实验的临时产物（脚本跑完会留几个 .txt）
+combo-*.txt
+dfa-*.txt
+wcfg-*.txt
+brake.txt
+compact-demo.txt
+interrupt-step*.txt
+approval-test.txt
+probe*.txt
+final-check.txt
+
+# 编辑器和系统垃圾
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
+
+# 实验运行产物：日志、样本文件、配置备份
+trace.log
+hello.txt
+*.bak
