@@ -1,0 +1,40 @@
+# 换行符钉死，别让 Git 自作主张转换。
+#
+# 为什么需要：这台 Windows 上 core.autocrlf=true，checkout 时会把文本文件转成 CRLF。
+# 对 .command（macOS 双击入口）来说这是致命的——shebang 行带 \r 之后，
+# macOS 会直接报 `bad interpreter: /bin/bash^M`，双击没反应。
+#
+# 所以：shell 脚本一律 LF，二进制不动，其余按平台默认。
+# 参考：实验 27 之前踩过「本机事实写死」的坑，换行符是同一类——本机差异别带进仓库。
+
+# macOS/Linux 的可执行脚本：必须 LF
+*.command text eol=lf
+*.sh      text eol=lf
+
+# Windows 的批处理：CRLF 才符合习惯，也不会坏
+*.bat     text eol=crlf
+*.vbs     text eol=crlf
+*.ps1     text eol=crlf
+
+# 其余文本按平台默认（仓库里存 LF，checkout 时按平台转）
+*.mjs     text
+*.js      text
+*.json    text
+*.md      text
+*.css     text
+*.html    text
+*.toml    text
+*.txt     text
+*.java    text
+
+# 二进制：绝不转换
+*.png     binary
+*.jpg     binary
+*.ico     binary
+*.zip     binary
+*.exe     binary
+*.db      binary
+*.sqlite  binary
+
+# patch 文件本身就是文本差异，转了就打不上
+*.patch   text eol=lf
