@@ -1,0 +1,55 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index a69f26c..4b5a2ce 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -420,7 +420,38 @@ pub(crate) async fn run_turn(
+ 
+     let mut next_step_context = Some(first_step_context);
+     let mut guardian_budget_compacted = false;
++    // [AGENT-LAB 探针] 数一下这个 turn 里循环转了几圈。
++    let mut agent_lab_iteration: u32 = 0;
++    // [AGENT-LAB 保险] 这一轮最多让循环转几圈。默认 20，可用环境变量 AGENT_LAB_MAX_ITERATIONS 覆盖。
++    // 默认值适合问答；真实编码任务（预检/查元数据/写文件/跑检查）20 圈不够，
++    // 用环境变量放宽（实测 60 圈才能写完一个插件）。保险值也会过期，别硬扛。
++    let agent_lab_max_iterations: u32 = std::env::var("AGENT_LAB_MAX_ITERATIONS")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(20);
+     loop {
++        agent_lab_iteration += 1;
++        // 刹车：不管模型还想不想继续，转够圈数就停。
++        // 注意这个检查放在循环最顶上，所以 auto-compact、stop hook、guardian
++        // 那几条 continue 路径也都会被它拦住。
++        if agent_lab_iteration > agent_lab_max_iterations {
++            eprintln!(
++                "\n[AGENT-LAB] !!! 达到循环上限 {} 圈，强制停止这一轮 !!!",
++                agent_lab_max_iterations
++            );
++            sess.send_event(
++                &turn_context,
++                EventMsg::Warning(WarningEvent {
++                    message: format!(
++                        "达到循环上限 {} 圈，已强制停止这一轮（Agent Lab 保险）。",
++                        agent_lab_max_iterations
++                    ),
++                }),
++            )
++            .await;
++            break;
++        }
++        eprintln!("\n[AGENT-LAB] ===== 循环第 {} 圈开始：准备把上下文发给模型 =====", agent_lab_iteration);
+         // Note that pending_input would be something like a message the user
+         // submitted through the UI while the model was running. Though the UI
+         // may support this, the model might not.
+@@ -563,6 +594,11 @@ pub(crate) async fn run_turn(
+                 let needs_follow_up = model_needs_follow_up || has_pending_input;
+                 let token_limit_reached = token_status.token_limit_reached;
+ 
++                eprintln!(
++                    "[AGENT-LAB] 循环第 {} 圈结束：模型想继续? {}；当前上下文 token = {}",
++                    agent_lab_iteration, model_needs_follow_up, token_status.active_context_tokens
++                );
++
+                 trace!(
+                     turn_id = %turn_context.sub_id,
+                     total_usage_tokens = token_status.active_context_tokens,
