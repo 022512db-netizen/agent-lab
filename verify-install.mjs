@@ -104,6 +104,10 @@ check(
 
 // ---------- 5. 运行态 ----------
 console.log("\n=== 5. 运行态（App + 模型真回话）===");
+// 注意：/api/info 的 ready 字段**要先有人发过一次 RPC 才会变 true**——
+// 内核是第一个请求到了才拉起来的。所以早先只轮询 info 的版本永远等不到 ready，
+// 在没预热过的新机器上必然误报「App 起不来」。这里轮询时顺手发一次轻量 RPC
+// （thread/list，只读、无副作用），把内核唤醒。
 async function waitReady(timeoutMs = 60000) {
   const until = Date.now() + timeoutMs;
   let last = null;
@@ -111,15 +115,42 @@ async function waitReady(timeoutMs = 60000) {
     try {
       last = await (await fetch(`${BASE}/api/info`)).json();
       if (last.ready === true) return last;
+      // 还没 ready：发一次轻量 RPC 催一下内核。
+      await fetch(`${BASE}/api/rpc`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method: "thread/list", params: {} }),
+        signal: AbortSignal.timeout(20000),
+      }).catch(() => {});
     } catch { last = null; }
     await new Promise((r) => setTimeout(r, 800));
   }
   return last;
 }
-const info = await waitReady();
-if (!check(info?.ready === true, `App 已就绪（${BASE}）`)) {
+// App 没起就自己拉起来。为什么：新机器（尤其 Mac 首次部署）上没人在跑服务，
+// 早先版本这里直接 FAIL 退出，等于把「装完了吗」这个检查问成了「你手动起了吗」。
+// 自检的职责就是把能自己做的事做掉——起服务属于这一类。
+let info = await waitReady(3000);
+if (info?.ready !== true) {
+  console.log("  App 没在跑，自动启动它（最多等 90 秒）…");
+  const { spawn } = await import("node:child_process");
+  // 日志不能丢掉：早先 stdio:"ignore" 时，起不来就完全没有线索。
+  // 写进 launch.log，和桌面入口同一个文件，失败时人知道去哪看。
+  const { openSync } = await import("node:fs");
+  const logFd = openSync(path.join(HERE, "launch.log"), "a");
+  const child = spawn(process.execPath, [path.join(HERE, "app", "server.mjs")], {
+    cwd: HERE,
+    env: { ...process.env, ...env, PORT: String(process.env.PORT ?? 8787) },
+    stdio: ["ignore", logFd, logFd],
+    detached: true,
+  });
+  child.unref();
+  info = await waitReady(90000);
+  if (info?.ready === true) console.log("  App 已起来（自检结束后它继续运行）");
+}
+if (!check(info?.ready === true, `App 可访问（${BASE}）`)) {
   console.log("\n=== 结论 ===");
-  console.log("[FAIL] App 起不来。先在项目目录跑：node start.mjs，再看其它项。");
+  console.log("[FAIL] App 起不来。手工跑一次看报错：node start.mjs");
   process.exit(1);
 }
 console.log(`  工作目录: ${info.cwd}`);
