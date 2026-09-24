@@ -3,41 +3,85 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Agent Lab</title>
+    <title>苍穹</title>
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
     <aside class="rail">
       <div class="rail-head">
         <span class="dot" id="status-dot"></span>
-        <strong>Agent Lab</strong>
+        <strong>苍穹</strong>
+        <span class="spacer"></span>
+        <button id="theme-toggle" class="ghost" title="切换深色 / 浅色主题">◐</button>
       </div>
       <button id="new-thread" class="ghost">新会话</button>
       <button id="edit-knowledge" class="ghost">编辑我的知识</button>
+      <div class="row-actions">
+        <button id="open-models" class="ghost">模型设置</button>
+        <button id="open-skills" class="ghost">技能</button>
+      </div>
       <!-- 会话开在哪个项目，决定苍穹技能能不能找到 ok-cosmic.json。
            所以这是个真选项，不是装饰。 -->
       <select id="project" class="project" title="新会话的工作目录"></select>
       <div class="cwd" id="cwd">工作目录加载中…</div>
+      <button id="add-workspace" class="ghost">新增工作区…</button>
       <div class="threads" id="threads"></div>
     </aside>
 
     <main class="main">
       <header class="bar">
         <div class="title" id="thread-title">未开始</div>
-        <div class="cost" id="cost"></div>
-        <div class="meta" id="turn-meta"></div>
+        <div class="bar-right">
+          <div class="context-meter" id="context-meter" hidden title="当前活跃上下文占用 / 模型上下文总容量">
+            <span class="meter-label">上下文</span>
+            <div class="meter-bar-bg"><div class="meter-bar-fill" id="meter-fill"></div></div>
+            <span class="meter-text" id="meter-text">0 / 0</span>
+          </div>
+          <button id="compact-btn" class="compact-btn" title="压缩上下文：由模型提炼前序历史摘要，释放上下文容量" hidden>
+            <svg class="compact-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="m14 10 7-7"/><path d="m3 21 7-7"/></svg>
+            <span>压缩上下文</span>
+          </button>
+          <div class="cost" id="cost"></div>
+          <div class="meta" id="turn-meta"></div>
+        </div>
       </header>
 
       <section class="stream" id="stream">
         <div class="empty" id="empty">
-          在下面输入一句话，让 Codex 在你的项目里动手。
+          在下面输入一句话，让苍穹在你的项目里动手。
         </div>
       </section>
 
       <footer class="composer">
-        <textarea id="input" rows="1" placeholder="说清楚要它做什么…（Enter 发送，Shift+Enter 换行）"></textarea>
-        <button id="send">发送</button>
-        <button id="stop" class="stop" hidden>停止</button>
+        <div class="composer-box">
+          <textarea id="input" rows="1" placeholder="随心输入…（Enter 发送，Shift+Enter 换行）"></textarea>
+          <div class="composer-tools">
+            <div class="composer-tools-right">
+              <div class="menu-anchor">
+                <button id="model-btn" class="composer-pill" type="button" title="选择模型">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></svg>
+                  <span id="model-btn-label">模型</span>
+                  <svg class="icon chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+                <div class="menu" id="model-menu" hidden></div>
+              </div>
+              <div class="menu-anchor">
+                <button id="effort-btn" class="composer-pill" type="button" title="设置思考强度">
+                  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l2 8 4-16 2 8h6"/></svg>
+                  <span id="effort-btn-label">思考强度</span>
+                  <svg class="icon chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+                <div class="menu" id="effort-menu" hidden></div>
+              </div>
+              <button id="send" type="button" title="发送" aria-label="发送">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>
+              </button>
+              <button id="stop" type="button" title="停止" aria-label="停止" hidden>
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="5" y="5" rx="2"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
       </footer>
     </main>
 
@@ -55,6 +99,53 @@
       </div>
     </div>
     <!-- 脚本放最后：它要绑定上面这些元素，必须等 DOM 到位。 -->
+    <div class="modal" id="models-modal" hidden>
+      <div class="modal-box">
+        <div class="modal-head">
+          <strong>模型设置</strong>
+          <button id="models-close" class="ghost">关闭</button>
+        </div>
+        <div class="modal-hint" id="models-hint"></div>
+        <div class="form-grid">
+          <label>Provider</label>
+          <select id="provider-select"></select>
+          <label>名称</label>
+          <input id="provider-name" placeholder="例如 relay" />
+          <label>Base URL</label>
+          <input id="provider-url" placeholder="http://127.0.0.1:57321" />
+          <label>API Key</label>
+          <input id="provider-key" type="password" placeholder="留空则不修改已保存的密钥" />
+          <label>协议</label>
+          <select id="provider-wire">
+            <option value="responses">responses</option>
+            <option value="chat">chat</option>
+          </select>
+        </div>
+        <div class="row-actions">
+          <button id="provider-new" class="ghost">新建</button>
+          <button id="provider-fetch">从上游获取模型</button>
+          <button id="provider-save">保存并启用</button>
+          <button id="provider-delete" class="danger">删除</button>
+        </div>
+        <div class="modal-hint">上游模型（点击一项就设为当前模型）</div>
+        <div class="chip-list" id="upstream-models"></div>
+      </div>
+    </div>
+
+    <div class="modal" id="skills-modal" hidden>
+      <div class="modal-box">
+        <div class="modal-head">
+          <strong>技能</strong>
+          <button id="skills-close" class="ghost">关闭</button>
+        </div>
+        <div class="modal-hint" id="skills-hint"></div>
+        <div class="row-actions">
+          <input id="skill-path" placeholder="技能目录，含 SKILL.md" />
+          <button id="skill-link">加入技能</button>
+        </div>
+        <div class="skill-list" id="skill-list"></div>
+      </div>
+    </div>
     <script src="/app.js"></script>
   </body>
 </html>

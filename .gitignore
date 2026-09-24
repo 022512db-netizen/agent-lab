@@ -1,6 +1,9 @@
 # 本机密钥。不进版本库——这里是明文 token。
 .env
 
+# 本机的模型/provider 选择。用户的 base URL 和模型清单是私人环境，不进版本库。
+agent-lab.settings.json
+
 # 运行数据：跟代码无关，而且很大。
 # 实测整个目录 2.4G，其中 codex-home 占 1.9G、浏览器 profile 占 546M。
 # 这些是「跑出来的」，不该跟着代码走。
@@ -46,3 +49,12 @@ Thumbs.db
 trace.log
 hello.txt
 *.bak
+
+# 发版产物：构建出来的包不该进版本库，走 GitHub Release 分发。
+# 里面含 200MB+ 的内置 Node 运行时，进库只会让 clone 变慢。
+dist/
+
+# 构建中间目录（下载的 Node 运行时、.iconset 等）
+dist/_mac-stage/
+dist/_mac-build/
+dist/_win-stage/

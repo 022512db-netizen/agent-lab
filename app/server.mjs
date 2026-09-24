@@ -6,6 +6,20 @@ import { spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { existsSync, mkdirSync, symlinkSync } from "node:fs";
 import { loadLocalEnv } from "../lib/env.mjs";
+import { findCodex } from "../lib/platform.mjs";
+import {
+  loadSettings,
+  saveSettings,
+  getActiveProvider,
+  providerConfigOverrides,
+  fetchUpstreamModels,
+  writeEnvValue,
+  providerApiKey,
+  hasProviderKey,
+  safeId,
+  normalizeBaseUrl,
+  ROOT as LAB_ROOT,
+} from "../lib/settings.mjs";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
@@ -18,37 +32,78 @@ const USAGE_FILE = path.join(HERE, "..", ".thread-usage.json");
 // app -> agent-lab -> 工作区根目录
 const DEFAULT_CWD = process.env.AGENT_CWD ?? path.resolve(HERE, "../..");
 
+// 独立配置目录：这个 App 只挂「我的知识」，不继承 ~/.codex 里那一堆全局工具。
+const CODEX_HOME =
+  process.env.AGENT_CODEX_HOME === "global"
+    ? process.env.CODEX_HOME
+    : path.join(HERE, "..", "codex-home");
+
 // ---------- 与 codex app-server 的通道 ----------
 let child = null;
 let buffer = "";
 let nextId = 1;
 let ready = false;
+let startupError = null;
 const pending = new Map(); // 我方发出的请求 id -> {resolve, reject}
 const serverRequests = new Map(); // 服务端反问的请求 id -> 原始请求
 const sseClients = new Set();
 
-// 桌面启动时窗口一关就没人看这个服务了。但 Edge 刷新会瞬断一下，所以
-// 空窗后先等一会儿再退；单独跑 server 调试时不启用（不受影响）。
 const EXIT_WHEN_IDLE = process.env.AGENT_LAB_EXIT_WHEN_IDLE === "1";
-// 宽限期可调，只为了让自检脚本不用等 15 秒。
-const IDLE_GRACE_MS = Number(process.env.AGENT_LAB_IDLE_MS ?? 15000);
+//
+// 桌面启动时窗口一关就没人看这个服务了，所以闲下来要能自己退出。
+// 单独跑 server 调试时不启用（不受影响）。
+// 但这里踩过一个坑：早先只看「SSE 断了就退出」，结果窗口一旦被系统挂起、
+// 或浏览器回收了长连接，服务就自杀，用户看到的是「页面还在、状态灯变灰、
+// 发什么都没反应」——看起来就像服务起不来。
+//
+// 所以退出的条件收紧成三个同时成立：曾经有客户端连过、当前既没有 SSE 也没有
+// 在飞的请求、且连续 IDLE_GRACE_MS 完全没人访问过（含普通 HTTP 请求）。
+// 宽限期默认 10 分钟：窗口切后台一会儿再回来，服务必须还在。
+const IDLE_GRACE_MS = Number(process.env.AGENT_LAB_IDLE_MS ?? 10 * 60 * 1000);
 let idleTimer = null;
+let hadClient = false;
+let lastActivity = Date.now();
+
+// 任何一次 HTTP 访问（页面、轮询、API）都算「有人在用」。
+function noteActivity() {
+  lastActivity = Date.now();
+  // 计时器已经在跑就按新的剩余时间重排，保证「最后一次访问 + 宽限期」退出。
+  if (EXIT_WHEN_IDLE && idleTimer && sseClients.size === 0) armIdleTimer();
+}
+
+// 按「距离真正闲置满还差多久」重排，而不是每次都重排一整段宽限期，
+// 否则实际存活时间会变成宽限期的两倍，语义不精确。
+function armIdleTimer() {
+  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+  const remaining = Math.max(0, IDLE_GRACE_MS - (Date.now() - lastActivity));
+  idleTimer = setTimeout(() => {
+    idleTimer = null;
+    // 退出前重新确认一次：这段时间里可能又有人连回来了。
+    const stillIdle = sseClients.size === 0 && pending.size === 0;
+    const quietFor = Date.now() - lastActivity;
+    if (!hadClient || !stillIdle || quietFor < IDLE_GRACE_MS) {
+      if (hadClient && stillIdle) armIdleTimer();
+      return;
+    }
+    console.log(`已连续 ${Math.round(quietFor / 60000)} 分钟没有窗口连接，关闭服务。`);
+    if (child) child.kill();
+    server.close(() => process.exit(0));
+    // 兜底：还有别的连接挂着就 2 秒后硬退。
+    setTimeout(() => process.exit(0), 2000).unref();
+  }, remaining);
+}
+
+
 function noteClientChange() {
   if (!EXIT_WHEN_IDLE) return;
   if (sseClients.size > 0) {
+    hadClient = true;
+    noteActivity();
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = null;
     return;
   }
-  if (idleTimer) return;
-  idleTimer = setTimeout(() => {
-    idleTimer = null;
-    if (sseClients.size > 0) return;
-    if (child) child.kill();
-    server.close(() => process.exit(0));
-    // 兜底：还有别的连接挂着就 1 秒后硬退。
-    setTimeout(() => process.exit(0), 1000).unref();
-  }, IDLE_GRACE_MS);
+  armIdleTimer();
 }
 
 // 会话累计用量缓存。内核的历史接口不带 token 数，但它在会话进行中会推
@@ -134,7 +189,10 @@ function observeProbe(line) {
 // 落盘，重启后历史会话也还能看到用量。（就一张小表，不必上数据库。）
 try {
   const raw = JSON.parse(await readFile(USAGE_FILE, "utf8"));
-  for (const [k, v] of Object.entries(raw)) if (typeof v === "number") threadTokens.set(k, v);
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === "number") threadTokens.set(k, { total: v, activeContext: null, contextWindow: null });
+    else if (v && typeof v === "object") threadTokens.set(k, v);
+  }
 } catch {}
 
 let usageSaveTimer = null;
@@ -151,8 +209,21 @@ function scheduleUsageSave() {
 
 function broadcast(payload) {
   const frame = `data: ${JSON.stringify(payload)}\n\n`;
-  for (const res of sseClients) res.write(frame);
+  for (const res of sseClients) {
+    try {
+      res.write(frame);
+    } catch {}
+  }
 }
+
+// 每 15 秒向所有 SSE 客户端发一次心跳注释，防止长思考或长耗时工具执行期间连接被断开
+setInterval(() => {
+  for (const res of sseClients) {
+    try {
+      res.write(": keep-alive\n\n");
+    } catch {}
+  }
+}, 15000);
 
 function onLine(line) {
   let msg;
@@ -182,15 +253,31 @@ function onLine(line) {
   // 最后一圈后面没有「下一圈开始」了，得在这里收尾结账。
   // 工具条目和 turn/completed 走的是同一条 stdout，顺序有保证，不会漏。
   if (msg.method === "turn/completed") flushLoopCost();
-  // 顺手记下累计用量，供历史回放用。
+
+  // 顺手记下累计用量与当前活跃上下文占用，供历史回放与容量条显示用。
   if (msg.method === "thread/tokenUsage/updated") {
     const id = msg.params?.threadId;
-    const total = msg.params?.tokenUsage?.total?.totalTokens;
-    if (id && typeof total === "number") {
-      threadTokens.set(id, total);
+    const u = msg.params?.tokenUsage;
+    if (id && u) {
+      const total = u.total?.totalTokens ?? 0;
+      const activeContext = (u.last?.inputTokens ?? 0) + (u.last?.cachedInputTokens ?? 0);
+      const contextWindow = u.modelContextWindow ?? getModelContextWindow(settings().activeModel);
+      threadTokens.set(id, { total, activeContext, contextWindow });
       scheduleUsageSave();
     }
   }
+}
+
+function getModelContextWindow(modelSlug) {
+  try {
+    const catalogPath = path.join(CODEX_HOME, "model-catalogs", "relay-mu96ubev.json");
+    if (existsSync(catalogPath)) {
+      const cat = JSON.parse(readFileSync(catalogPath, "utf8"));
+      const m = cat.models?.find((x) => x.slug === modelSlug || x.id === modelSlug);
+      if (m?.context_window) return m.context_window;
+    }
+  } catch {}
+  return 128000;
 }
 
 // 我自己的 MCP 工具服务路径
@@ -216,17 +303,18 @@ const KNOWLEDGE_DIR =
 // 写到一个本地 inbox 里，你看到合适的再手动搬进去。
 const KNOWLEDGE_INBOX = process.env.AGENT_KNOWLEDGE_INBOX ?? path.join(HERE, "..", "knowledge-inbox.md");
 
-// 独立配置目录：这个 App 只挂「我的知识」，不继承 ~/.codex 里那一堆全局工具。
-// 实测：继承全局时开局 32 个工具，用这份配置只剩 2 个（见实验 11）。
-// 想改回继承全局：设 AGENT_CODEX_HOME=global 或在启动器里改这个变量。
-const CODEX_HOME =
-  process.env.AGENT_CODEX_HOME === "global"
-    ? process.env.CODEX_HOME
-    : path.join(HERE, "..", "codex-home");
-
 // 用哪个内核？默认系统装的，也可以用环境变量指向自己编译的。
 // 例：CODEX_BIN="C:/dev/codex/.../codex.exe" node start.mjs
-const CODEX_BIN = process.env.CODEX_BIN ?? "codex";
+// 用统一的查找函数，不要自己回退成字符串 "codex"：
+// 从桌面双击启动时 PATH 里常常没有 codex，直接 spawn("codex") 就是 ENOENT。
+// findCodex() 会先扫自编译产物、再扫已知安装位置（比如 ChatGPT.app 里那份），
+// 最后才交给 PATH 解析。
+const CODEX_BIN = findCodex();
+
+// 本机设置（模型 provider / 当前模型 / 推理强度）。懒加载，改完立刻生效。
+function settings() {
+  return loadSettings();
+}
 
 // 把苍穹开发要用的技能接进来。
 //
@@ -281,9 +369,12 @@ function linkCosmicSkills() {
 // 只改 App 不改它们，就会留下一串「看起来毫不相关」的红灯（踩过）。
 function startCodex() {
   linkCosmicSkills();
+  startupError = null;
   // -c 覆盖只对本次启动生效，不会污染全局 config.toml。
   const args = [
     "app-server",
+    // 模型 provider / 模型 / 推理强度从本机 settings 覆盖，不改可提交的 config.toml。
+    ...providerConfigOverrides(settings()),
     "-c",
     `mcp_servers.my_knowledge.command=${JSON.stringify(process.execPath)}`,
     "-c",
@@ -337,6 +428,10 @@ function startCodex() {
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (d) => {
     process.stderr.write("[codex] " + d);
+    // 留着最后一行错误，内核退出时能把它带给界面，而不是只说「退出了」。
+    const text = String(d);
+    const errLine = text.split("\n").find((l) => /error|Error|panic|failed/i.test(l));
+    if (errLine) startupError = errLine.trim().slice(0, 300);
     // 内核里的探针输出会走到 stderr。把它也推给界面，
     // 这样在 App 里就能看见「循环第几圈」。
     for (const line of String(d).split("\n")) {
@@ -347,14 +442,47 @@ function startCodex() {
     }
   });
 
+  // 内核直接退出（配置错误、端口冲突等）时，把在飞的请求都拒掉。
+  // 只广播事件不 reject 的话，调用方要等到 120 秒超时才知道失败。
   child.on("exit", (code) => {
     ready = false;
+    if (pending.size) {
+      for (const [id, p] of pending) {
+        pending.delete(id);
+        p.reject(new Error(`内核已退出（code ${code}）` + (startupError ? `：${startupError}` : "")));
+      }
+    }
     broadcast({ method: "lab/serverExited", params: { code } });
+  });
+  // 内核启动失败（比如配置写错）时一定要把在飞的 initialize 拒掉。
+  // 不拒的话 restartCodex 会一直挂到 120 秒超时，界面上表现就是「保存卡死」。
+  child.on("error", (err) => {
+    ready = false;
+    for (const [id, p] of pending) {
+      pending.delete(id);
+      p.reject(new Error("内核启动失败: " + (err?.message ?? err)));
+    }
   });
 }
 
 // 回复「服务端反问客户端」的请求（审批等）。
 // 这类请求由 server 主动发起，带 id，客户端必须用同一个 id 回话。
+// 运行中的内核要换模型时不能只改配置：模型、provider 都是启动期绑定的。
+// 所以「切到另一个 provider」= 杀掉内核重启，让它用新参数重新初始化。
+// 同一 provider 内换模型不需要重启，turn/start 每轮都能带 model。
+async function restartCodex() {
+  const old = child;
+  ready = false;
+  child = null;
+  buffer = "";
+  pending.clear();
+  if (old && old.exitCode === null) {
+    // 断开所有监听，避免旧进程退出时污染新内核的状态。
+    old.removeAllListeners();
+    old.kill();
+  }
+  await ensureReady();
+}
 function replyToServer(id, result) {
   if (!child || child.exitCode !== null) throw new Error("codex 未在运行");
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
@@ -371,8 +499,23 @@ function rpc(method, params, id = nextId++) {
   });
 }
 
+// 初始化必须合并成一次。页面一加载会同时打几个接口（模型清单、技能、设置），
+// 它们各自 await ensureReady()；没有合并时第二个会再发一次 initialize，
+// 内核回 "Already initialized"，异常逃出请求处理器——Node 默认直接结束进程，
+// 现象就是「窗口刚打开，服务就没了」。
+let readyPromise = null;
+
 async function ensureReady() {
   if (ready) return;
+  if (!readyPromise) {
+    readyPromise = initializeKernel().finally(() => {
+      readyPromise = null;
+    });
+  }
+  return readyPromise;
+}
+
+async function initializeKernel() {
   if (!child || child.exitCode !== null) startCodex();
   const initId = nextId++;
   const res = await rpc(
@@ -383,7 +526,14 @@ async function ensureReady() {
     },
     initId,
   );
-  if (res.error) throw new Error(JSON.stringify(res.error));
+  if (res.error) {
+    // 万一另一个初始化赢了（内核已经初始化过），这不是错误：当作已就绪即可。
+    if (/already initialized/i.test(JSON.stringify(res.error))) {
+      ready = true;
+      return;
+    }
+    throw new Error(JSON.stringify(res.error));
+  }
   ready = true;
 }
 
@@ -399,8 +549,33 @@ async function loadKnowledge() {
 // ---------- HTTP ----------
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
 
-const server = createServer(async (req, res) => {
+function sendJson(res, status, payload) {
+  if (res.headersSent) return;
+  res.writeHead(status, { "Content-Type": "application/json" }).end(JSON.stringify(payload));
+}
+
+// 读一个 JSON 请求体，解析失败直接回 400。写接口都走这一个入口。
+function readJson(req, res, done) {
+  let raw = "";
+  req.on("data", (c) => (raw += c));
+  req.on("end", () => {
+    let body;
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      sendJson(res, 400, { error: "请求体不是合法 JSON" });
+      return;
+    }
+    Promise.resolve()
+      .then(() => done(body))
+      .catch((err) => sendJson(res, 400, { error: String(err?.message ?? err) }));
+  });
+}
+
+async function handleRequest(req, res) {
   const url = new URL(req.url, "http://localhost");
+  // 任何请求都算「有人在用」：空闲退出的判断依赖它。
+  noteActivity();
 
   if (url.pathname === "/api/events") {
     res.writeHead(200, {
@@ -428,17 +603,43 @@ const server = createServer(async (req, res) => {
         // 历史回放需要知道这个会话之前的累计用量：历史接口里没有这个数，
         // 所以由读历史的一方顺带问一句，我们把它缓存过的值告诉它。
         if (method === "lab/threadTokens") {
+          const entry = threadTokens.get(String(params.threadId));
+          const result = typeof entry === "number"
+            ? { total: entry, activeContext: null, contextWindow: null }
+            : (entry ? { ...entry } : { total: null, activeContext: null, contextWindow: null });
+          if (!result.contextWindow) {
+            result.contextWindow = getModelContextWindow(settings().activeModel);
+          }
           res.writeHead(200, { "Content-Type": "application/json" }).end(
-            // 包一层 result，跟其它方法的返回形状保持一致（前端读的是 json.result）。
-            JSON.stringify({ result: { total: threadTokens.get(String(params.threadId)) ?? null } }),
+            JSON.stringify({ result }),
           );
           return;
         }
-        // 会话起点：把本地知识挂成开发者指令，模型从第一轮就看得到。
+        // 会话起点：知识注入 + 带上当前选中的模型。
         let finalParams = params;
         if (method === "thread/start") {
           const knowledge = await loadKnowledge();
-          if (knowledge) finalParams = { ...params, developerInstructions: knowledge };
+          const s = settings();
+          if (s.activeModel) finalParams = { ...finalParams, model: finalParams.model || s.activeModel };
+          // 新会话也要一开始就用上所选强度，否则首个 turn 之前会话会是内核
+          // 启动时的旧值（实测刚切完强度，新会话读回来还是 high）。
+          // 注意：thread/start 的参数表里没有 effort（只有 turn/start 有），
+          // 传 effort 会被内核静默忽略。新会话要靠 config 覆盖才真的生效，
+          // 否则首个 turn 之前会话会停在启动时的旧强度。
+          if (s.reasoningEffort) {
+            finalParams = {
+              ...finalParams,
+              config: { ...(finalParams.config ?? {}), model_reasoning_effort: s.reasoningEffort },
+            };
+          }
+          if (knowledge) finalParams = { ...finalParams, developerInstructions: knowledge };
+        }
+        // 每一轮都带当前模型：这样在 App 里切完模型，下一条消息就用新的，
+        // 不用重开会话。用户显式传了 model 就尊重用户的。
+        if (method === "turn/start") {
+          const s = settings();
+          if (s.activeModel) finalParams = { ...finalParams, model: finalParams.model || s.activeModel };
+          if (s.reasoningEffort) finalParams = { ...finalParams, effort: finalParams.effort ?? s.reasoningEffort };
         }
         const result = await rpc(method, finalParams);
         res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
@@ -479,10 +680,264 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // 可选工作目录清单。苍穹专家技能要靠会话的工作目录往上找 ok-cosmic.json，
-  // 所以「会话开在哪个项目」不是个小设置，它决定技能能不能真的生效。
-  // 清单写在 projects.json；没有这个文件就退化成只有默认工作目录。
+  // ---------- 模型设置 ----------
+  // 读当前 provider / 模型 / 可选模型。密钥只回「有没有」，不回值。
+  if (url.pathname === "/api/settings" && req.method === "GET") {
+    const s = settings();
+    const active = getActiveProvider();
+    sendJson(res, 200, {
+      activeProvider: s.activeProvider,
+      activeModel: s.activeModel,
+      reasoningEffort: s.reasoningEffort,
+      activeBaseUrl: active?.baseUrl ?? "",
+      activeHasKey: active ? hasProviderKey(active) : false,
+      providers: s.providers.map((p) => ({
+        id: p.id,
+        name: p.name,
+        baseUrl: p.baseUrl,
+        wireApi: p.wireApi,
+        envKey: p.envKey,
+        models: p.models,
+        updatedAt: p.updatedAt,
+        hasKey: hasProviderKey(p),
+      })),
+    });
+    return;
+  }
+
+  // 写设置：新增/更新 provider、写密钥、切换 provider、切换模型、删除 provider。
+  // 切 provider 要重启内核（provider 是启动期绑定的）；同 provider 内切模型不重启。
+  if (url.pathname === "/api/settings" && req.method === "POST") {
+    readJson(req, res, async (body) => {
+      const s = settings();
+      let restartNeeded = false;
+
+      if (body.provider) {
+        const incoming = body.provider;
+        const id = safeId(incoming.id || incoming.name, "custom");
+        const baseUrl = normalizeBaseUrl(incoming.baseUrl);
+        if (!baseUrl) throw new Error("缺少 base URL");
+        const existing = s.providers.find((p) => p.id === id);
+        // 保留已有 provider 的 envKey：默认那份用的是 AGENT_LAB_API_KEY，
+        // 如果这里重算成 AGENT_LAB_KEY_CUSTOM，用户没重填密钥就会“密钥突然丢了”。
+        const envKey = existing?.envKey || `AGENT_LAB_KEY_${id.toUpperCase().replace(/-/g, "_")}`;
+        const models = Array.isArray(incoming.models)
+          ? [...new Set(incoming.models.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim()))]
+          : existing?.models ?? [];
+        const next = {
+          id,
+          name: String(incoming.name || existing?.name || id).trim(),
+          baseUrl,
+          wireApi: incoming.wireApi === "chat" ? "chat" : "responses",
+          envKey,
+          models,
+          updatedAt: new Date().toISOString(),
+        };
+        const idx = s.providers.findIndex((p) => p.id === id);
+        if (idx >= 0) s.providers[idx] = next;
+        else s.providers.push(next);
+        // 空字符串不当成“清空密钥”——输入框留空就只是没改。
+        if (typeof incoming.apiKey === "string" && incoming.apiKey.trim()) {
+          writeEnvValue(envKey, incoming.apiKey.trim());
+        }
+        if (incoming.activate) {
+          if (s.activeProvider !== id) restartNeeded = true;
+          s.activeProvider = id;
+          if (!next.models.includes(s.activeModel)) s.activeModel = next.models[0] ?? "";
+        }
+      }
+
+      if (body.activeProvider) {
+        const id = safeId(body.activeProvider);
+        const provider = s.providers.find((p) => p.id === id);
+        if (!provider) throw new Error("没有这个 provider：" + id);
+        if (s.activeProvider !== id) restartNeeded = true;
+        s.activeProvider = id;
+        if (!provider.models.includes(s.activeModel)) s.activeModel = provider.models[0] ?? "";
+      }
+
+      // 切模型：不重启，下一轮 turn/start 带过去。同时把名字记到 provider 里。
+      if (typeof body.activeModel === "string" && body.activeModel.trim()) {
+        s.activeModel = body.activeModel.trim();
+        const provider = getActiveProvider();
+        if (provider && !provider.models.includes(s.activeModel)) provider.models.push(s.activeModel);
+      }
+
+      if (body.removeProvider) {
+        const id = safeId(body.removeProvider);
+        if (id === s.activeProvider) throw new Error("不能删除正在使用的 provider");
+        s.providers = s.providers.filter((p) => p.id !== id);
+      }
+
+      if (body.reasoningEffort) s.reasoningEffort = String(body.reasoningEffort);
+      saveSettings(s);
+      if (restartNeeded) await restartCodex();
+      const active = getActiveProvider();
+      sendJson(res, 200, {
+        ok: true,
+        restarted: restartNeeded,
+        activeProvider: s.activeProvider,
+        activeModel: s.activeModel,
+        activeHasKey: active ? hasProviderKey(active) : false,
+      });
+    });
+    return;
+  }
+
+  // 从上游拉模型名。用「正在编辑的那份参数」，因为用户常常还没保存就想先看见清单。
+  if (url.pathname === "/api/models/upstream" && req.method === "POST") {
+    readJson(req, res, async (body) => {
+      const baseUrl = normalizeBaseUrl(body.baseUrl);
+      if (!baseUrl) throw new Error("缺少 base URL");
+      const known = settings().providers.find((p) => p.id === safeId(body.providerId || ""));
+      const apiKey = body.apiKey || providerApiKey(known) || "";
+      const { url: from, models } = await fetchUpstreamModels({ baseUrl, apiKey });
+      sendJson(res, 200, { ok: true, from, models });
+    });
+    return;
+  }
+
+  // 内核自己认可的模型清单，用来给用户一个「内核能识别」的参照。
+  if (url.pathname === "/api/models/kernel" && req.method === "GET") {
+    await ensureReady();
+    const result = await rpc("model/list", { includeHidden: true });
+    const data = result?.result?.data ?? result?.data ?? [];
+    sendJson(res, 200, {
+      ok: true,
+      // 把推理强度元数据一并给前端：输入框里的「思考强度」菜单要按模型
+      // 实际支持的档位来列，不能硬编码一份，否则会出现内核不认的死选项。
+      models: data.map((m) => ({
+        id: m.id ?? m.model,
+        displayName: m.displayName ?? m.id ?? m.model,
+        hidden: !!m.hidden,
+        supportedReasoningEfforts: m.supportedReasoningEfforts ?? null,
+        defaultReasoningEffort: m.defaultReasoningEffort ?? null,
+      })),
+    });
+    return;
+  }
+
+  // ---------- 技能 ----------
+  // 列出内核实际发现的技能（含来源和作用域），前端据此做开关和展示。
+  if (url.pathname === "/api/skills" && req.method === "GET") {
+    await ensureReady();
+    const cwd = url.searchParams.get("cwd") || DEFAULT_CWD;
+    const result = await rpc("skills/list", { cwds: [cwd], forceReload: true });
+    const entry = result?.result?.data?.[0] ?? result?.data?.[0] ?? { skills: [], errors: [] };
+    sendJson(res, 200, { cwd, skills: entry.skills ?? [], errors: entry.errors ?? [] });
+    return;
+  }
+
+  // 技能写操作，四选一：
+  //   { name, enabled }  开关某个已发现的技能
+  //   { path, enabled }  按路径开关
+  //   { addRoot }        把外部技能根目录加进扫描范围（一个目录里可放多个技能）
+  //   { linkTo, name }   把一个外部技能目录软链进 codex-home/skills（单个技能）
+  if (url.pathname === "/api/skills" && req.method === "POST") {
+    readJson(req, res, async (body) => {
+      await ensureReady();
+
+      // 「加入 skill」：源目录自己维护，App 只留一条链接，不像拷贝那样会各自变旧。
+      if (body.linkTo) {
+        const source = path.resolve(String(body.linkTo));
+        if (!existsSync(source)) throw new Error("源目录不存在：" + source);
+        // 允许两种输入：直接是技能目录（含 SKILL.md），或它的上一级目录。
+        const isSkillDir = existsSync(path.join(source, "SKILL.md"));
+        const name = safeId(body.name || (isSkillDir ? path.basename(source) : ""));
+        const finalSource = isSkillDir ? source : path.join(source, name);
+        if (!existsSync(path.join(finalSource, "SKILL.md"))) {
+          throw new Error("没找到 SKILL.md：" + path.join(finalSource, "SKILL.md"));
+        }
+        // 内核只认带 YAML frontmatter（--- name/description ---）的 SKILL.md。
+        // 不带 frontmatter 的文件会被静默忽略：链接建好了、列表里却没有这个技能，
+        // 用户完全不知道错在哪。所以这里提前拦住，直接告诉他要补什么。
+        const skillText = await readFile(path.join(finalSource, "SKILL.md"), "utf8");
+        if (!/^---\s*\n[\s\S]*?\n---/.test(skillText.trimStart())) {
+          throw new Error(
+            "SKILL.md 缺少 YAML frontmatter，内核会忽略它。开头需要：\n" +
+            '---\nname: "技能名"\ndescription: "一句话说明"\n---',
+          );
+        }
+        const skillsDir = path.join(CODEX_HOME, "skills");
+        mkdirSync(skillsDir, { recursive: true });
+        const target = path.join(skillsDir, name);
+        if (existsSync(target)) throw new Error("已经有一个叫 " + name + " 的技能了");
+        symlinkSync(finalSource, target, process.platform === "win32" ? "junction" : "dir");
+        const list = await rpc("skills/list", { cwds: [DEFAULT_CWD], forceReload: true });
+        sendJson(res, 200, {
+          ok: true,
+          linked: { name, source: finalSource },
+          skills: list?.result?.data?.[0]?.skills ?? list?.data?.[0]?.skills ?? [],
+        });
+        return;
+      }
+
+      // 「加入一个技能根目录」：里面可以放多个技能。
+      if (body.addRoot) {
+        const root = path.resolve(String(body.addRoot));
+        if (!existsSync(root)) throw new Error("目录不存在：" + root);
+        const roots = new Set(Array.isArray(body.roots) ? body.roots : []);
+        roots.add(root);
+        await rpc("skills/extraRoots/set", { extraRoots: [...roots] });
+        const list = await rpc("skills/list", { cwds: [DEFAULT_CWD], forceReload: true });
+        sendJson(res, 200, {
+          ok: true,
+          roots: [...roots],
+          skills: list?.result?.data?.[0]?.skills ?? list?.data?.[0]?.skills ?? [],
+        });
+        return;
+      }
+
+      // 开关技能：内核原生支持按 name 或 path 写。
+      const params = { enabled: !!body.enabled };
+      if (body.path) params.path = path.resolve(String(body.path));
+      else if (body.name) params.name = String(body.name);
+      else throw new Error("需要 name 或 path");
+      const result = await rpc("skills/config/write", params);
+      const list = await rpc("skills/list", { cwds: [DEFAULT_CWD], forceReload: true });
+      sendJson(res, 200, {
+        ok: true,
+        effectiveEnabled: result?.result?.effectiveEnabled ?? result?.effectiveEnabled,
+        skills: list?.result?.data?.[0]?.skills ?? list?.data?.[0]?.skills ?? [],
+      });
+    });
+    return;
+  }
+
   if (url.pathname === "/api/projects") {
+    // 可选工作目录清单。苍穹专家技能要靠会话的工作目录往上找 ok-cosmic.json，
+    // 所以「会话开在哪个项目」不是个小设置，它决定技能能不能真的生效。
+    // 清单写在 projects.json；路径不存在的会被过滤，保证下拉框里没有死选项。
+    // 工作区新增/删除：写进 projects.json。路径先做存在性校验。
+    if (req.method === "POST") {
+      readJson(req, res, async (body) => {
+        const file = path.join(LAB_ROOT, "projects.json");
+        let list = [];
+        try {
+          list = JSON.parse(await readFile(file, "utf8")).projects ?? [];
+        } catch {
+          list = [];
+        }
+        if (body.path) {
+          const target = path.resolve(String(body.path));
+          if (!existsSync(target)) throw new Error("目录不存在：" + target);
+          if (!list.some((p) => path.resolve(p.path) === target)) {
+            list.push({ name: String(body.name || path.basename(target) || target).trim(), path: target });
+          }
+        }
+        if (body.removePath) {
+          const target = path.resolve(String(body.removePath));
+          list = list.filter((p) => path.resolve(p.path) !== target);
+        }
+        await writeFile(file, JSON.stringify({ projects: list }, null, 2) + "\n", "utf8");
+        const visible = list.filter((p) => existsSync(p.path));
+        sendJson(res, 200, {
+          ok: true,
+          projects: visible.length ? visible : [{ name: "默认工作目录", path: DEFAULT_CWD }],
+        });
+      });
+      return;
+    }
     const raw = await readFile(path.join(HERE, "..", "projects.json"), "utf8").catch(() => null);
     let list = [];
     try {
@@ -497,6 +952,34 @@ const server = createServer(async (req, res) => {
     // 一个都不剩（比如刚换机器、路径还没改）时，至少留默认工作目录可用。
     if (!list.length) list = [{ name: "默认工作目录", path: DEFAULT_CWD }];
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ projects: list }));
+    return;
+  }
+
+  // 用系统目录选择器选工作区。浏览器拿不到本地绝对路径，所以调系统对话框：
+  // macOS 用 osascript，Windows 用 PowerShell 的 FolderBrowserDialog。
+  if (url.pathname === "/api/pick-directory" && req.method === "POST") {
+    let out = "";
+    if (process.platform === "darwin") {
+      const script = 'POSIX path of (choose folder with prompt "选择要加入的工作区")';
+      out = await new Promise((resolve) => {
+        const p = spawn("osascript", ["-e", script], { stdio: ["ignore", "pipe", "ignore"] });
+        let buf = "";
+        p.stdout.on("data", (d) => (buf += d));
+        p.on("error", () => resolve(""));
+        p.on("exit", (code) => resolve(code === 0 ? buf.trim() : ""));
+      });
+    } else if (process.platform === "win32") {
+      const ps = "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='选择要加入的工作区'; if($d.ShowDialog() -eq 'OK'){Write-Output $d.SelectedPath}";
+      out = await new Promise((resolve) => {
+        const p = spawn("powershell.exe", ["-NoProfile", "-Command", ps], { stdio: ["ignore", "pipe", "ignore"] });
+        let buf = "";
+        p.stdout.on("data", (d) => (buf += d));
+        p.on("error", () => resolve(""));
+        p.on("exit", () => resolve(buf.trim()));
+      });
+    }
+    // 取消也是正常操作，返回 canceled 而不是报错。
+    sendJson(res, 200, out ? { ok: true, path: out } : { ok: false, canceled: true });
     return;
   }
 
@@ -531,11 +1014,44 @@ const server = createServer(async (req, res) => {
   } catch {
     res.writeHead(404).end("not found");
   }
+}
+
+// 请求处理器里抛出的异常绝不能逃逸：async 函数里未接住的异常会变成
+// unhandledRejection，Node 默认直接结束进程（前面两次「服务起不来」都是这个）。
+// 这里统一兜底，把错误变成一条 500 JSON，服务继续活着。
+const server = createServer((req, res) => {
+  handleRequest(req, res).catch((err) => {
+    console.error("[http] 处理请求失败:", err?.message ?? err);
+    sendJson(res, 500, { error: String(err?.message ?? err) });
+  });
+});
+
+// 最后一道防线。上面的 try/catch 已经盖住了 HTTP 路径，但只要将来有任何一处
+// 漏掉 await/catch，Node 默认会直接结束进程——一个后台小毛病就能把整个桌面 App
+// 干掉，而且终端一闪就没了，很难查。这里至少把它降级成一条显眼的日志。
+process.on("unhandledRejection", (err) => {
+  console.error("[unhandled] 未处理的 Promise 拒绝（已拦住，服务继续）:", err?.stack ?? err);
 });
 
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`Agent Lab 已启动: http://127.0.0.1:${PORT}`);
   console.log(`工作目录: ${DEFAULT_CWD}`);
+});
+
+// 端口被占时不要抛一堆栈就死：告诉用户是谁占着，该怎么办。
+// 踩过：重复双击启动（或旧进程没退干净）时，第二个进程直接 EADDRINUSE 崩溃，
+// 终端一闪而过，用户只看到「服务起不来了」。
+server.on("error", (err) => {
+  if (err?.code === "EADDRINUSE") {
+    console.error(`端口 ${PORT} 已经被占用了。`);
+    console.error("可能是已经有一份 Agent Lab 在跑（那就直接用，重复启动是安全的）。");
+    console.error(`想确认是谁占着：lsof -nP -iTCP:${PORT} -sTCP:LISTEN`);
+    console.error(`想换端口启动：PORT=8788 node start.mjs`);
+  } else {
+    console.error("服务启动失败:", err?.message ?? err);
+  }
+  if (child) child.kill();
+  process.exit(1);
 });
 
 process.on("SIGINT", () => {
