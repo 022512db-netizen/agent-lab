@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "appName": "Agent Lab",
+  "bundleIdentifier": "com.agentlab.desktop",
+  "minimumOSVersion": "11.0",
+  "category": "public.app-category.developer-tools",
+  "note": "Swift 壳的构建参数。build/macos-app.sh 读它，避免把版本号散在脚本各处。"
+}

@@ -65,6 +65,9 @@ trust_level = "trusted"
 [projects.'c:\hnsh\sherp']
 trust_level = "trusted"
 
+[projects."/Library/苍穹agent/agent-lab"]
+trust_level = "trusted"
+
 # 关掉「应用/连接器」这类远端工具面（chatgpt.com 那一批）。
 # 这个 App 只干本地开发一件事，不需要账号级的应用工具一起挤上下文。
 # 留个开关：想启用就改成 true。

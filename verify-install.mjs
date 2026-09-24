@@ -8,7 +8,7 @@
 //   1. Node 本身 + 项目文件齐全
 //   2. 密钥（.env / 环境变量）
 //   3. 配置（codex-home/config.toml + 模型目录）
-//   4. 内核（自编译或 PATH）+ Python（苍穹技能脚本需要）
+//   4. 内核（自编译 / 已装应用 / PATH）+ Python（苍穹技能脚本需要）
 //   5. 运行态：App 起得来、模型真的回话
 //
 // 运行：node verify-install.mjs
@@ -84,8 +84,12 @@ try {
 // ---------- 4. 内核 / Python / 技能 ----------
 console.log("\n=== 4. 内核与脚本依赖 ===");
 const codex = findCodex();
+// 内核可能来自三个地方：自己编译的产物、已装应用里带的（ChatGPT.app），
+// 或 PATH 里的 codex。分开说清楚，否则会把应用自带的那份误报成「自编译」。
 if (codex === "codex") {
   check(true, "内核：使用 PATH 里的 codex（未找到自编译版本，属正常回退）", { warn: true });
+} else if (codex.includes(".app/Contents/")) {
+  check(existsSync(codex), `内核（应用自带）：${codex}`);
 } else {
   check(existsSync(codex), `内核（自编译）：${codex}`);
 }
