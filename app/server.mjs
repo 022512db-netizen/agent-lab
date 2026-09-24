@@ -1033,6 +1033,25 @@ process.on("unhandledRejection", (err) => {
   console.error("[unhandled] 未处理的 Promise 拒绝（已拦住，服务继续）:", err?.stack ?? err);
 });
 
+// 父进程守护：由原生壳拉起时，壳一旦退出，桥不能变成孤儿进程继续占端口。
+// 用 PPID 轮询（Node 里比 PCAP/processgroup 更跨平台），2 秒一次，
+// 只在显式传了 AGENT_LAB_PARENT_PID 时才启用，不影响命令行直接跑的场景。
+const PARENT_PID = Number(process.env.AGENT_LAB_PARENT_PID ?? 0);
+if (PARENT_PID > 0) {
+  const parentWatch = setInterval(() => {
+    try {
+      // process.kill(pid, 0) 只是探测，不真的发信号；进程不存在时会抛 ESRCH。
+      process.kill(PARENT_PID, 0);
+    } catch {
+      console.log("父进程已退出，桥随之退出，避免孤儿进程占用端口。");
+      if (child) child.kill();
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 2000).unref();
+    }
+  }, 2000);
+  parentWatch.unref();
+}
+
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`Agent Lab 已启动: http://127.0.0.1:${PORT}`);
   console.log(`工作目录: ${DEFAULT_CWD}`);
