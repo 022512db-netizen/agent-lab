@@ -193,7 +193,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try? FileManager.default.createDirectory(at: ws, withIntermediateDirectories: true)
         }
         env["AGENT_CWD"] = ws.path
-        env["AGENT_CODEX_HOME"] = root.deletingLastPathComponent().appendingPathComponent("codex-home").path
         // 自带 Node 不在 PATH 里，MCP 服务进程也要用它，显式指过去。
         env["PATH"] = "\(URL(fileURLWithPath: node).deletingLastPathComponent().path):\(env["PATH"] ?? "/usr/bin:/bin")"
         // 告诉桥"我是谁"，让它在壳退出后自己收掉（防孤儿进程占端口）。

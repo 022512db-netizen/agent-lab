@@ -64,10 +64,21 @@ AGENT_CWD="C:/你的项目" PORT=8787 node start.mjs
 
 ```
 codex-home/config.toml     env_key = "AGENT_LAB_API_KEY"   ← 只留一个变量名
-.env                       AGENT_LAB_API_KEY=sk-...        ← 真值，被 .gitignore 排除
+源码运行：agent-lab/.env    AGENT_LAB_API_KEY=sk-...        ← 真值，被 .gitignore 排除
+安装版：<用户数据目录>/.env  AGENT_LAB_API_KEY=sk-...        ← 真值，权限 600
 ```
 
 `app/server.mjs` 启动内核时读 `.env`，把键值放进子进程环境。**环境变量优先**，所以临时覆盖直接 `AGENT_LAB_API_KEY=xxx node start.mjs` 就行。
+
+安装版的可变数据不再写进 `Agent Lab.app`，默认落在：
+
+```
+macOS    ~/Library/Application Support/AgentLab
+Windows  %APPDATA%\AgentLab
+Linux    ~/.config/AgentLab
+```
+
+其中包含 `.env`、`agent-lab.settings.json`、`projects.json`、`codex-home/` 和运行用量缓存。首次启动新版会从旧包（或源码仓库）迁移一次已有配置；之后升级 App 不会覆盖这些文件。需要改位置时设置 `AGENT_LAB_DATA_DIR`。
 
 新机器上从 `.env.example` 复制一份 `.env` 填自己的 token 即可。
 

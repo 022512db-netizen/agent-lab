@@ -19,6 +19,12 @@ import {
   safeId,
   normalizeBaseUrl,
   ROOT as LAB_ROOT,
+  CODEX_HOME,
+  DATA_DIR,
+  PROJECTS_FILE,
+  USAGE_FILE,
+  KNOWLEDGE_INBOX_FILE,
+  ensureDataLayout,
 } from "../lib/settings.mjs";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
@@ -28,15 +34,11 @@ const PORT = Number(process.env.PORT ?? 8787);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(HERE, "public");
 const KNOWLEDGE_FILE = path.join(HERE, "..", "knowledge.md");
-const USAGE_FILE = path.join(HERE, "..", ".thread-usage.json");
 // app -> agent-lab -> 工作区根目录
 const DEFAULT_CWD = process.env.AGENT_CWD ?? path.resolve(HERE, "../..");
 
-// 独立配置目录：这个 App 只挂「我的知识」，不继承 ~/.codex 里那一堆全局工具。
-const CODEX_HOME =
-  process.env.AGENT_CODEX_HOME === "global"
-    ? process.env.CODEX_HOME
-    : path.join(HERE, "..", "codex-home");
+// 首次启动会把包内默认配置迁到用户目录；之后所有可变状态都留在 App 外。
+ensureDataLayout();
 
 // ---------- 与 codex app-server 的通道 ----------
 let child = null;
@@ -301,7 +303,7 @@ const KNOWLEDGE_DIR =
 
 // 工具新写的东西不能混进真知识库：那里只记特定项目、有自己的规矩。
 // 写到一个本地 inbox 里，你看到合适的再手动搬进去。
-const KNOWLEDGE_INBOX = process.env.AGENT_KNOWLEDGE_INBOX ?? path.join(HERE, "..", "knowledge-inbox.md");
+const KNOWLEDGE_INBOX = process.env.AGENT_KNOWLEDGE_INBOX ?? KNOWLEDGE_INBOX_FILE;
 
 // 用哪个内核？默认系统装的，也可以用环境变量指向自己编译的。
 // 例：CODEX_BIN="C:/dev/codex/.../codex.exe" node start.mjs
@@ -739,6 +741,8 @@ async function handleRequest(req, res) {
         // 空字符串不当成“清空密钥”——输入框留空就只是没改。
         if (typeof incoming.apiKey === "string" && incoming.apiKey.trim()) {
           writeEnvValue(envKey, incoming.apiKey.trim());
+          // The key is injected into the kernel process at spawn time.
+          restartNeeded = true;
         }
         if (incoming.activate) {
           if (s.activeProvider !== id) restartNeeded = true;
@@ -911,7 +915,7 @@ async function handleRequest(req, res) {
     // 工作区新增/删除：写进 projects.json。路径先做存在性校验。
     if (req.method === "POST") {
       readJson(req, res, async (body) => {
-        const file = path.join(LAB_ROOT, "projects.json");
+        const file = PROJECTS_FILE;
         let list = [];
         try {
           list = JSON.parse(await readFile(file, "utf8")).projects ?? [];
@@ -938,7 +942,7 @@ async function handleRequest(req, res) {
       });
       return;
     }
-    const raw = await readFile(path.join(HERE, "..", "projects.json"), "utf8").catch(() => null);
+    const raw = await readFile(PROJECTS_FILE, "utf8").catch(() => null);
     let list = [];
     try {
       list = JSON.parse(raw)?.projects ?? [];
@@ -1055,6 +1059,7 @@ if (PARENT_PID > 0) {
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`Agent Lab 已启动: http://127.0.0.1:${PORT}`);
   console.log(`工作目录: ${DEFAULT_CWD}`);
+  console.log(`用户数据: ${DATA_DIR}`);
 });
 
 // 端口被占时不要抛一堆栈就死：告诉用户是谁占着，该怎么办。

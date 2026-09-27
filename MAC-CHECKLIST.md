@@ -22,11 +22,17 @@ npm install -g @openai/codex    # 内核：先用官方版，探针以后再说
 
 ## 2. 配密钥
 
+源码运行时：
+
 ```bash
 cp .env.example .env
 ```
 
 编辑 `.env`，把 `AGENT_LAB_API_KEY` 换成你的 token。
+
+安装版不需要改 App 包：在窗口的「模型设置」里填 API Key 并保存。新版会把
+`.env`、`agent-lab.settings.json` 和运行数据写到
+`~/Library/Application Support/AgentLab`，保存密钥后自动重启内核。
 
 ## 3. 一键自检 ← **主要就靠这一步**
 
