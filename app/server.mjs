@@ -27,6 +27,7 @@ import {
   ensureDataLayout,
 } from "../lib/settings.mjs";
 import { isReadOnlyCommand } from "../lib/readonly.mjs";
+import { ensureCatalog } from "../lib/catalog.mjs";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
@@ -376,9 +377,24 @@ function linkCosmicSkills() {
 //
 // 读 .env 的逻辑抽到了 lib/env.mjs，因为直连内核的实验脚本也要用同一份——
 // 只改 App 不改它们，就会留下一串「看起来毫不相关」的红灯（踩过）。
+// settings 里出现过的每个模型都补进模型目录，避免内核报「Model metadata not found」。
+function syncModelCatalog() {
+  const s = settings();
+  const slugs = [s.activeModel, ...(s.providers ?? []).flatMap((p) => p.models ?? [])];
+  try {
+    const added = ensureCatalog({ codexHome: CODEX_HOME, dataDir: DATA_DIR, slugs });
+    if (added.length) console.log("模型目录已补齐:", added.join(", "));
+    return added.length > 0;
+  } catch (err) {
+    console.error("模型目录补齐失败:", err);
+    return false;
+  }
+}
+
 function startCodex() {
   linkCosmicSkills();
   startupError = null;
+  syncModelCatalog();
   // -c 覆盖只对本次启动生效，不会污染全局 config.toml。
   const args = [
     "app-server",
@@ -782,6 +798,8 @@ async function handleRequest(req, res) {
 
       if (body.reasoningEffort) s.reasoningEffort = String(body.reasoningEffort);
       saveSettings(s);
+      // 目录是内核启动时读的：补了新模型就得重启内核才生效。
+      if (syncModelCatalog()) restartNeeded = true;
       if (restartNeeded) await restartCodex();
       const active = getActiveProvider();
       sendJson(res, 200, {
