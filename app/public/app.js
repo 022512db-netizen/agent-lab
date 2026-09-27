@@ -649,6 +649,11 @@ function onEvent(msg) {
     showApproval(msg);
     return;
   }
+  if (m === "lab/autoApproved") {
+    const c = p.command;
+    addCard("probe", "查询命令已自动放行", Array.isArray(c) ? c.join(" ") : String(c ?? ""));
+    return;
+  }
   if (m === "lab/innerLoop") {
     // 「结束」那行不单独出卡片：紧跟着的账单把同一件事说得更清楚，
     // 两张卡重复同一条消息只是噪音。保留「开始」那行当圈与圈的分界。
@@ -855,6 +860,10 @@ function newThread() {
   return startingThread;
 }
 
+// 审批规则：只读查询由内核自动放行，其余操作（写文件、装依赖、改库等）一律由用户审批。
+// untrusted = 只有内核认定的安全只读命令免审批。每轮 turn/start 都带上，恢复的旧会话也生效。
+const APPROVAL_POLICY = "untrusted";
+
 async function startThread() {
   // 允许在工作区目录写入（workspace-write），避免在选定项目中无法直接修改代码。
   // 超出工作区范围的操作依然会走审批闸门。
@@ -865,7 +874,7 @@ async function startThread() {
     cwd: selectedProjectPath(),
     model: null,
     sandbox: "workspace-write",
-    approvalPolicy: "on-request",
+    approvalPolicy: APPROVAL_POLICY,
   });
   threadId = res.thread.id;
   $("thread-title").textContent = "新会话";
@@ -895,6 +904,7 @@ async function send() {
   try {
     const res = await rpc("turn/start", {
       threadId,
+      approvalPolicy: APPROVAL_POLICY,
       input: [{ type: "text", text, textElements: [] }],
     });
     // 请求本身就回了 turn id，不用等 turn/started 通知。否则刚点完发送就点停止，
