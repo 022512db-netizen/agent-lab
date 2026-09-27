@@ -17,10 +17,20 @@
 
 ## 2. 配置模型和密钥
 
+**源码运行**：
+
 ```bash
 cp .env.example .env
 # 然后编辑 .env，把 AGENT_LAB_API_KEY 的值换成你的 token
 ```
+
+**安装版**：不需要改 App 包。点左栏「模型设置」，填 Base URL 和 API Key 后
+「保存并启用」。新版会把密钥写到用户数据目录的 `.env`，并自动重启内核：
+
+- macOS：`~/Library/Application Support/AgentLab/.env`
+- Windows：`%APPDATA%\AgentLab\.env`
+
+设置、项目清单和 `codex-home/` 也都在这个用户数据目录中，升级 App 不会覆盖。
 
 模型默认是 `xiaomi/mimo-v2.6-flash`（走本地中转）。换模型改
 `codex-home/config.toml` 里的 `model =`，**同时**在
@@ -31,7 +41,7 @@ cp .env.example .env
 
 也可以在窗口里改：左栏「模型设置」→ 填名称、Base URL、API Key →
 点「从上游获取模型」→ 在下拉里选一个 → 「保存并启用」。
-切换模型不用重开会话，下一句话就用新的。密钥只写进本机 `.env`，
+切换模型不用重开会话，下一句话就用新的。密钥只写进用户数据目录的 `.env`，
 provider 和模型选择写进 `agent-lab.settings.json`（两者都不进版本库）。
 
 ## 3. 选项目，开始干活

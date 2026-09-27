@@ -220,8 +220,14 @@ try {
   await es.body.cancel();
 } catch {}
 
-const raw = JSON.stringify(events);
-const authError = /401|unauthor|invalid.*api.?key|missing.*api.?key|EnvVar/i.test(raw);
+// 只检查真正的错误载荷。把整条事件流一起塞进正则会把知识注入、模型回复
+// 或工具输出里恰好出现的词语也算成认证错误，造成假红。
+const errorPayloads = events.flatMap((event) => {
+  if (event.method === "turn/completed") return [JSON.stringify(event.params?.turn?.error ?? null)];
+  if (event.method === "error") return [JSON.stringify(event.params ?? null)];
+  return [];
+});
+const authError = /401|unauthor|invalid.*api.?key|missing.*api.?key|EnvVar/i.test(errorPayloads.join("\n"));
 const answer = events
   .filter((e) => e.method === "item/completed" && e.params?.item?.type === "agentMessage")
   .map((e) => e.params.item.text ?? "")

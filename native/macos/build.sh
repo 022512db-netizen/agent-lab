@@ -49,6 +49,8 @@ trim_node() {
   mkdir -p "$out/bin"
   mv "$out/bin/node" "$out/bin/_node" 2>/dev/null || true
   [ -f "$out/bin/_node" ] && mv "$out/bin/_node" "$out/bin/node"
+  # npm/npx/corepack 是符号链接；运行时只保留 node，链接也必须一起删。
+  find "$out/bin" -maxdepth 1 -type l -delete 2>/dev/null || true
   find "$out/bin" -maxdepth 1 -type f ! -name node -delete 2>/dev/null || true
   rm -rf "$out/lib/node_modules" "$out/include" "$out/share" "$out/lib/dtrace" 2>/dev/null || true
 }
@@ -68,7 +70,8 @@ fi
 echo "==> 编译 Swift 壳"
 SRC="$HERE/AgentLab/main.swift"
 swiftc -parse-as-library -O -target arm64-apple-macos12.0 -o "$BUILD_DIR/AgentLab-arm64" "$SRC"
-swiftc -parse-as-library -O -target x86_64-apple-macos12.0 -o "$BUILD_DIR/AgentLab-x64" "$SRC"
+swiftc -parse-as-library -O -target x86_64-apple-macos12.0 \
+  -runtime-compatibility-version none -o "$BUILD_DIR/AgentLab-x64" "$SRC"
 lipo -create -output "$MACOS_DIR/AgentLab" "$BUILD_DIR/AgentLab-arm64" "$BUILD_DIR/AgentLab-x64"
 chmod +x "$MACOS_DIR/AgentLab"
 rm -f "$BUILD_DIR/AgentLab-arm64" "$BUILD_DIR/AgentLab-x64"
