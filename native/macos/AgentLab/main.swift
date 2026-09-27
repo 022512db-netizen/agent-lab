@@ -157,6 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
         webView = WKWebView(frame: rect, configuration: config)
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         // 加载中先给个底色，避免白闪。
         webView.setValue(NSColor.windowBackgroundColor, forKey: "backgroundColor")
         window.contentView = webView
@@ -304,5 +305,41 @@ extension AppDelegate: WKNavigationDelegate {
             NSWorkspace.shared.open(url)
             decisionHandler(.cancel)
         }
+    }
+}
+
+// WKWebView 默认不实现 JS 弹窗：不接这三个回调，confirm() 直接返回 false、
+// alert()/prompt() 什么都不显示，界面上就是「按钮点了没反应」。
+extension AppDelegate: WKUIDelegate {
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "好")
+        alert.runModal()
+        completionHandler()
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+        completionHandler(alert.runModal() == .alertFirstButtonReturn)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?, initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = prompt
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = defaultText ?? ""
+        alert.accessoryView = field
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+        alert.window.initialFirstResponder = field
+        completionHandler(alert.runModal() == .alertFirstButtonReturn ? field.stringValue : nil)
     }
 }
