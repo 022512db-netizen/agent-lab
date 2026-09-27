@@ -794,3 +794,8 @@ body {
 .skill-row .skill-desc { color: var(--muted); font-size: 11px; margin-top: 2px; }
 .skill-row .skill-scope { color: var(--muted); font-size: 11px; }
 .skill-row input[type="checkbox"] { margin-top: 3px; }
+
+/* 隐藏工具过程：命令、工具调用、探针与账单卡片不进聊天流 */
+#stream.hide-tools .card.tool,
+#stream.hide-tools .card.probe { display: none; }
+#access-btn.full { color: #c2410c; border-color: #fdba74; }
