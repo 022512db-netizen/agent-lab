@@ -118,6 +118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var webView: WKWebView!
     private var server: Process?
     private var pollTimer: Timer?
+    private var pollInFlight = false
+    private var pollDone = false
     private var shutdown = false
 
     private let port: Int = 8787
@@ -212,8 +214,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 关掉最后一个窗口时把桥一起收掉，不然会留一个孤儿 node 占着端口。
         p.terminationHandler = { [weak self] proc in
-            guard let self = self, !self.shutdown else { return }
             DispatchQueue.main.async {
+                guard let self = self, !self.shutdown else { return }
                 NSLog("[AgentLab] 桥已退出，code=\(proc.terminationStatus)")
             }
         }
@@ -245,17 +247,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 桥要加载模块、拉起 codex 内核，可能要好几秒。直接 load 会先显示
     // 「无法连接」，再靠用户手刷。这里轮询 /api/info，通了才真正加载。
     private func waitForServerThenLoad() {
-        var waited = 0
+        let deadline = Date().addingTimeInterval(60)
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
             guard let self = self else { timer.invalidate(); return }
-            waited += 1
+            guard !self.shutdown, !self.pollDone, !self.pollInFlight else { return }
+            self.pollInFlight = true
             self.probe { [weak self] ok in
                 guard let self = self else { return }
+                guard !self.shutdown, !self.pollDone else { return }
+                self.pollInFlight = false
                 if ok {
+                    self.pollDone = true
                     timer.invalidate()
                     self.pollTimer = nil
                     self.webView.load(URLRequest(url: self.baseURL))
-                } else if waited > 240 { // 60 秒还没起来就是真出问题了
+                } else if Date() >= deadline {
+                    self.pollDone = true
                     timer.invalidate()
                     self.pollTimer = nil
                     self.showFailure(
@@ -271,7 +278,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var req = URLRequest(url: baseURL.appendingPathComponent("api/info"))
         req.timeoutInterval = 1.5
         URLSession.shared.dataTask(with: req) { _, res, _ in
-            done((res as? HTTPURLResponse)?.statusCode == 200)
+            let ok = (res as? HTTPURLResponse)?.statusCode == 200
+            DispatchQueue.main.async {
+                done(ok)
+            }
         }.resume()
     }
 
