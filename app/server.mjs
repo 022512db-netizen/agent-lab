@@ -26,6 +26,7 @@ import {
   KNOWLEDGE_INBOX_FILE,
   ensureDataLayout,
 } from "../lib/settings.mjs";
+import { isReadOnlyCommand } from "../lib/readonly.mjs";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
@@ -242,6 +243,12 @@ function onLine(line) {
   }
   // 服务端主动发起的「请求」（审批等）：带 id + method，必须回话，否则这轮会卡住。
   if (msg.id !== undefined && msg.method) {
+    // 审批规则：纯查询命令自动放行，其余（写文件、装依赖、改库等）交给用户决定。
+    if (msg.method === "item/commandExecution/requestApproval" && isReadOnlyCommand(msg.params?.command)) {
+      replyToServer(msg.id, { decision: "accept" });
+      broadcast({ method: "lab/autoApproved", params: { command: msg.params?.command } });
+      return;
+    }
     serverRequests.set(String(msg.id), msg);
     broadcast({ id: msg.id, method: msg.method, params: msg.params, __isServerRequest: true });
     return;
