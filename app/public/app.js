@@ -578,6 +578,14 @@ const approvalNodes = new Map();
 function showApproval(msg) {
   const p = msg.params ?? {};
   if (approvalNodes.has(msg.id)) return;
+  if (fullAccess) {
+    fetch("/api/reply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: msg.id, decision: "accept" }),
+    });
+    return;
+  }
 
   const isCommand = msg.method === "item/commandExecution/requestApproval";
   const el = document.createElement("article");
@@ -860,9 +868,39 @@ function newThread() {
   return startingThread;
 }
 
-// 审批规则：只读查询由内核自动放行，其余操作（写文件、装依赖、改库等）一律由用户审批。
-// untrusted = 只有内核认定的安全只读命令免审批。每轮 turn/start 都带上，恢复的旧会话也生效。
-const APPROVAL_POLICY = "untrusted";
+// 权限模式（记在本机浏览器）：
+// - 需审批：纯查询自动放行（桥里判断），其余由用户审批；
+// - 完全访问：不设沙箱、不审批，等同 Codex 的「完全访问」。每轮 turn/start 都带上，切换立即生效。
+let fullAccess = localStorage.getItem("agentlab.fullAccess") === "1";
+const accessParams = () =>
+  fullAccess
+    ? { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }
+    : { approvalPolicy: "untrusted", sandboxPolicy: { type: "workspaceWrite", networkAccess: false } };
+function renderAccess() {
+  $("access-btn-label").textContent = fullAccess ? "完全访问" : "需审批";
+  $("access-btn").classList.toggle("full", fullAccess);
+  $("access-btn").title = fullAccess ? "完全访问：不审批、不设沙箱" : "需审批：只读查询自动放行，其余由你决定";
+}
+$("access-btn").onclick = () => {
+  if (!fullAccess && !confirm("完全访问后，agent 可以不经确认执行任何命令、修改任何文件。确定开启？")) return;
+  fullAccess = !fullAccess;
+  localStorage.setItem("agentlab.fullAccess", fullAccess ? "1" : "0");
+  renderAccess();
+};
+renderAccess();
+
+// 工具过程显示开关：默认隐藏命令、工具调用、探针和账单，只留对话、思考、文件改动和审批。
+let showTools = localStorage.getItem("agentlab.showTools") === "1";
+function renderTools() {
+  stream.classList.toggle("hide-tools", !showTools);
+  $("tools-btn-label").textContent = showTools ? "显示过程" : "过程已隐藏";
+}
+$("tools-btn").onclick = () => {
+  showTools = !showTools;
+  localStorage.setItem("agentlab.showTools", showTools ? "1" : "0");
+  renderTools();
+};
+renderTools();
 
 async function startThread() {
   // 允许在工作区目录写入（workspace-write），避免在选定项目中无法直接修改代码。
@@ -873,8 +911,8 @@ async function startThread() {
   const res = await rpc("thread/start", {
     cwd: selectedProjectPath(),
     model: null,
-    sandbox: "workspace-write",
-    approvalPolicy: APPROVAL_POLICY,
+    sandbox: fullAccess ? "danger-full-access" : "workspace-write",
+    approvalPolicy: accessParams().approvalPolicy,
   });
   threadId = res.thread.id;
   $("thread-title").textContent = "新会话";
@@ -904,7 +942,7 @@ async function send() {
   try {
     const res = await rpc("turn/start", {
       threadId,
-      approvalPolicy: APPROVAL_POLICY,
+      ...accessParams(),
       input: [{ type: "text", text, textElements: [] }],
     });
     // 请求本身就回了 turn id，不用等 turn/started 通知。否则刚点完发送就点停止，
